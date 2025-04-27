@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 #include <X11/Xlib.h>
 #include <X11/Xproto.h>
 #include <X11/Xutil.h>
@@ -17,9 +18,9 @@ static DynamicArray* client_windows;
 
 static Window wmcheckwin;
 
-enum { WMName, WMCheck };
+enum { WMName, WMCheck, WMDeleteWindow, WMProtocols };
 static Atom utf8string;
-static Atom atoms[2];
+static Atom atoms[4];
 
 void RemoveTitlebar(Client w)
 {
@@ -175,37 +176,55 @@ void OnConfigureRequest(const XConfigureRequestEvent* event)
   XConfigureWindow(display, e.window, e.value_mask, &changes);
 }
 
-void OnKeyPress(const XKeyEvent* e)
+void OnKeyPress(const XKeyEvent* event)
 {
+  if (event == NULL)
+  {
+    printf("OnKeyPress: the event argument passed was null\n");
+    return;
+  }
+  XKeyEvent e = *event;
+
   if ((e.state & Mod1Mask) &&
-      (e.keycode == XKeysymToKeycode(display_, XK_F4))) {
+      (e.keycode == XKeysymToKeycode(display, XK_F4))) 
+  {
     Atom* supported_protocols;
     int num_supported_protocols;
-    if (XGetWMProtocols(display_,
+    if (XGetWMProtocols(display,
           e.window,
           &supported_protocols,
-          &num_supported_protocols) &&
-        (::std::find(supported_protocols,
-                     supported_protocols + num_supported_protocols,
-                     WM_DELETE_WINDOW) !=
-         supported_protocols + num_supported_protocols)) {
-      printf("Trying to gracefully close the window");
-      XEvent msg;
-      memset(&msg, 0, sizeof(msg));
-      msg.xclient.type = ClientMessage;
-      msg.xclient.message_type = WM_PROTOCOLS;
-      msg.xclient.window = e.window;
-      msg.xclient.format = 32;
-      msg.xclient.data.l[0] = WM_DELETE_WINDOW;
-      if (XSendEvent(display_, e.window, false, 0, &msg) == 0)
+          &num_supported_protocols)) {
+      bool found = false;
+      for (int i = 0; i < num_supported_protocols; i++) 
       {
-        printf("Failed to send kill event");
+        if (supported_protocols[i] == atoms[WMDeleteWindow]) 
+        {
+          found = true;
+          break;
+        }
       }
-    } else {
-      printf("Killing window");
-      XKillClient(display_, e.window);
+      if (found) 
+      {
+        printf("Trying to gracefully close the window\n");
+        XEvent msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.xclient.type = ClientMessage;
+        msg.xclient.message_type = atoms[WMProtocols];
+        msg.xclient.window = e.window;
+        msg.xclient.format = 32;
+        msg.xclient.data.l[0] = atoms[WMDeleteWindow];
+        if (XSendEvent(display, e.window, false, 0, &msg) == 0)
+        {
+          printf("Failed to send kill event\n");
+        }
+      }
+    } else 
+    {
+      printf("Killing window\n");
+      XKillClient(display, e.window);
     }
   }    
+
 }
 
 void OnKeyRelease(const XKeyEvent* e)
@@ -231,6 +250,9 @@ int main()
   utf8string = XInternAtom(display, "UTF8_STRING", False);
   atoms[WMName] = XInternAtom(display, "_NET_WM_NAME", False);
   atoms[WMCheck] = XInternAtom(display, "_NET_SUPPORTING_WM_CHECK", False);
+  atoms[WMDeleteWindow] = XInternAtom(display, "WM_DELETE_WINDOW", False);
+  atoms[WMProtocols] = XInternAtom(display, "WM_PROTOCOLS", False);
+
 
   wmcheckwin = XCreateSimpleWindow(display, root_window, 0, 0, 1, 1, 0, 0, 0);
 	XChangeProperty(display, wmcheckwin, atoms[WMCheck], XA_WINDOW, 32, PropModeReplace, (unsigned char *) &wmcheckwin, 1);
