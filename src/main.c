@@ -23,13 +23,6 @@ static Atom atoms[2];
 
 void RemoveTitlebar(Client w)
 {
-  XWindowAttributes attrs;
-  if (XGetWindowAttributes(display, w.child, &attrs)) {
-    XReparentWindow(display, w.child, root_window, 0, 0);
-    XRemoveFromSaveSet(display, w.child);
-  } else {
-    printf("RemoveTitlebar: Attempted to reparent an invalid window\n");
-  }
   XUnmapWindow(display, w.frame); 
   XDestroyWindow(display, w.frame);
   removeClient(client_windows, w.index);
@@ -74,7 +67,7 @@ void AddTitlebar(Window w)
   XGrabButton(
       display,
       Button1,
-      Mod1Mask,
+      MODKEY,
       w,
       false,
       ButtonPressMask | ButtonReleaseMask | ButtonMotionMask,
@@ -86,7 +79,7 @@ void AddTitlebar(Window w)
   XGrabButton(
       display,
       Button3,
-      Mod1Mask,
+      MODKEY,
       w,
       false,
       ButtonPressMask | ButtonReleaseMask | ButtonMotionMask,
@@ -98,7 +91,7 @@ void AddTitlebar(Window w)
   XGrabKey(
       display,
       XKeysymToKeycode(display, XK_F4),
-      Mod1Mask,
+      MODKEY,
       w,
       false,
       GrabModeAsync,
@@ -107,7 +100,7 @@ void AddTitlebar(Window w)
   XGrabKey(
       display,
       XKeysymToKeycode(display, XK_Tab),
-      Mod1Mask,
+      MODKEY,
       w,
       false,
       GrabModeAsync,
@@ -152,6 +145,7 @@ void OnUnmapNotify(const XUnmapEvent* event)
   RemoveTitlebar(window_client);
 }
 
+
 void OnConfigureRequest(const XConfigureRequestEvent* event)
 {
   if (event == NULL)
@@ -180,6 +174,42 @@ void OnConfigureRequest(const XConfigureRequestEvent* event)
   //Resize the client area
   XConfigureWindow(display, e.window, e.value_mask, &changes);
 }
+
+void OnKeyPress(const XKeyEvent* e)
+{
+  if ((e.state & Mod1Mask) &&
+      (e.keycode == XKeysymToKeycode(display_, XK_F4))) {
+    Atom* supported_protocols;
+    int num_supported_protocols;
+    if (XGetWMProtocols(display_,
+          e.window,
+          &supported_protocols,
+          &num_supported_protocols) &&
+        (::std::find(supported_protocols,
+                     supported_protocols + num_supported_protocols,
+                     WM_DELETE_WINDOW) !=
+         supported_protocols + num_supported_protocols)) {
+      printf("Trying to gracefully close the window");
+      XEvent msg;
+      memset(&msg, 0, sizeof(msg));
+      msg.xclient.type = ClientMessage;
+      msg.xclient.message_type = WM_PROTOCOLS;
+      msg.xclient.window = e.window;
+      msg.xclient.format = 32;
+      msg.xclient.data.l[0] = WM_DELETE_WINDOW;
+      if (XSendEvent(display_, e.window, false, 0, &msg) == 0)
+      {
+        printf("Failed to send kill event");
+      }
+    } else {
+      printf("Killing window");
+      XKillClient(display_, e.window);
+    }
+  }    
+}
+
+void OnKeyRelease(const XKeyEvent* e)
+{}
 
 int main()
 {
@@ -235,6 +265,13 @@ int main()
       case UnmapNotify:
         OnUnmapNotify(&event.xunmap);
         break;
+      case KeyPress:
+        OnKeyPress(&event.xkey);
+        break;
+      case KeyRelease:
+        OnKeyRelease(&event.xkey);
+        break;
+
     }
 
   }
