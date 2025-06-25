@@ -10,17 +10,51 @@
 #include <X11/Xatom.h>
 #include "client.h"
 #include "config.h"
+#include "util.h"
 
 static Display* display;
 static Window root_window;
 static int screen;
 static DynamicArray* client_windows;
 
+static Position drag_start_cursor_position;
+static Position drag_start_window_position;
+static Size     drag_start_window_size;
+
+
 static Window wmcheckwin;
 
-enum { WMName, WMCheck, WMDeleteWindow, WMProtocols };
+enum { WMName, WMCheck, WMDeleteWindow, WMProtocols, WMNetSupported, WMNetActiveWindow };
 static Atom utf8string;
-static Atom atoms[4];
+static Atom atoms[6];
+
+void FocusWindow(Client w, bool raise)
+{
+  XSetInputFocus(display, w.child, RevertToPointerRoot, CurrentTime);
+
+  XChangeProperty(display, root_window,
+      atoms[WMNetActiveWindow], XA_WINDOW, 32, PropModeReplace,
+      (unsigned char *)&(w.child), 1);
+
+  if (raise) {
+    XRaiseWindow(display, w.frame);
+    XRaiseWindow(display, w.child);
+  }
+}
+
+void ResizeWindow(Client w, unsigned int width, unsigned int height)
+{
+    XResizeWindow(
+        display,
+        w.frame,
+        width, height
+    );
+    XResizeWindow(
+        display,
+        w.child,
+        width, height
+    );
+}
 
 void RemoveTitlebar(Client w)
 {
@@ -185,7 +219,7 @@ void OnKeyPress(const XKeyEvent* event)
   }
   XKeyEvent e = *event;
 
-  if ((e.state & Mod1Mask) &&
+  if ((e.state & MODKEY) &&
       (e.keycode == XKeysymToKeycode(display, XK_F4))) 
   {
     Atom* supported_protocols;
@@ -194,16 +228,16 @@ void OnKeyPress(const XKeyEvent* event)
           e.window,
           &supported_protocols,
           &num_supported_protocols)) {
-      bool found = false;
+      bool supports_delete_window = false;
       for (int i = 0; i < num_supported_protocols; i++) 
       {
         if (supported_protocols[i] == atoms[WMDeleteWindow]) 
         {
-          found = true;
+          supports_delete_window = true;
           break;
         }
       }
-      if (found) 
+      if (supports_delete_window) 
       {
         printf("Trying to gracefully close the window\n");
         XEvent msg;
@@ -217,6 +251,10 @@ void OnKeyPress(const XKeyEvent* event)
         {
           printf("Failed to send kill event\n");
         }
+      } else
+      {
+        printf("Killing window\n");
+        XKillClient(display, e.window);
       }
     } else 
     {
@@ -229,6 +267,70 @@ void OnKeyPress(const XKeyEvent* event)
 
 void OnKeyRelease(const XKeyEvent* e)
 {}
+
+void OnButtonPress(const XButtonEvent* event)
+{
+  printf("Button press\n");
+  if (event == NULL)
+  {
+    printf("OnButtonPress: event argument passed was null\n");
+    return;
+  }
+
+  XButtonEvent e = *event; 
+  
+  Client window_client;
+  if (findClient(client_windows, e.window, &window_client) == 1)
+  {
+    printf("OnButtonPress: the window being unmapped did not have a frame\n");
+    return;
+  }
+
+  drag_start_cursor_position = (Position) { e.x_root, e.y_root };
+  Window returned_root;
+  int x, y;
+  unsigned width, height, border_width, depth;
+  if (!XGetGeometry(
+      display,
+      window_client.frame,
+      &returned_root,
+      &x, &y,
+      &width, &height,
+      &border_width,
+      &depth)) {
+    printf("Could not get window's position and size");  
+  }
+  drag_start_window_position = (Position){x, y};
+  drag_start_window_size = (Size){width, height};
+
+
+  printf("Drag started on %d %d\n", drag_start_window_position.x, drag_start_window_position.y);
+  FocusWindow(window_client, true);
+}
+
+void OnMotionNotify(const XMotionEvent* e) {
+  Client window_client;
+  if (findClient(client_windows, e->window, &window_client) == 1)
+  {
+    printf("OnMotionNotify: movement object window not found\n");
+    return;
+  } 
+
+  Position deltaPosition = (Position){e->x_root - drag_start_cursor_position.x, e->y_root - drag_start_cursor_position.y};
+
+  if (e->state & Button1Mask)
+  {
+    XMoveWindow(
+        display,
+        window_client.frame,
+        drag_start_window_position.x + deltaPosition.x,
+        drag_start_window_position.y + deltaPosition.y
+    );
+  } else if (e->state & Button3Mask)
+  {
+    ResizeWindow(window_client, 700, 700);
+  }
+}
 
 int main()
 {
@@ -247,26 +349,44 @@ int main()
     return 1;
   }
 
+
   utf8string = XInternAtom(display, "UTF8_STRING", False);
   atoms[WMName] = XInternAtom(display, "_NET_WM_NAME", False);
   atoms[WMCheck] = XInternAtom(display, "_NET_SUPPORTING_WM_CHECK", False);
   atoms[WMDeleteWindow] = XInternAtom(display, "WM_DELETE_WINDOW", False);
   atoms[WMProtocols] = XInternAtom(display, "WM_PROTOCOLS", False);
+  atoms[WMNetSupported] = XInternAtom(display, "_NET_SUPPORTED", False);
+  atoms[WMNetActiveWindow] = XInternAtom(display, "_NET_ACTIVE_WINDOW", False);
+
+  Atom supported_atoms[] = {
+    atoms[WMNetActiveWindow]
+  };
+
 
 
   wmcheckwin = XCreateSimpleWindow(display, root_window, 0, 0, 1, 1, 0, 0, 0);
 	XChangeProperty(display, wmcheckwin, atoms[WMCheck], XA_WINDOW, 32, PropModeReplace, (unsigned char *) &wmcheckwin, 1);
 	XChangeProperty(display, wmcheckwin, atoms[WMName], utf8string, 8, PropModeReplace, (unsigned char *) WM_NAME, 3);
 	XChangeProperty(display, root_window, atoms[WMCheck], XA_WINDOW, 32, PropModeReplace, (unsigned char *) &wmcheckwin, 1);
+  XChangeProperty(
+    display,
+    root_window,
+    atoms[WMNetSupported],
+    XA_ATOM,
+    32,
+    PropModeReplace,
+    (unsigned char *)supported_atoms,
+    sizeof(supported_atoms) / sizeof(supported_atoms[0])
+);
 
   XSelectInput(
       display,
       root_window,
-      SubstructureRedirectMask | SubstructureNotifyMask | KeyPressMask);
+      SubstructureRedirectMask | SubstructureNotifyMask | KeyPressMask | ButtonPressMask);
   XSync(display, false);
 
   screen = DefaultScreen(display);
-  XSetWindowBackground(display, root_window, WhitePixel(display, screen));
+  XSetWindowBackground(display, root_window, BlackPixel(display, screen));
   XClearWindow(display, root_window);
 
   char running = 1;
@@ -293,7 +413,17 @@ int main()
       case KeyRelease:
         OnKeyRelease(&event.xkey);
         break;
-
+      case ButtonPress:
+        OnButtonPress(&event.xbutton);
+        break;
+      case MotionNotify:
+        while (XCheckTypedWindowEvent(
+            display, event.xmotion.window, MotionNotify, &event)) {}
+        OnMotionNotify(&event.xmotion);
+        break;
+      default:
+        printf("Ignored event\n");
+        break;
     }
 
   }

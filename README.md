@@ -1,4 +1,5 @@
 # NWM
+
 ## Nachal Window Manager
 Simple hobby window manager.
 
@@ -15,3 +16,5 @@ Use make to build and put the path to nwm into your .xinitrc:
 
 xinitrc:
 `/home/user/path/to/nwm/build/nwm`
+
+[Thanks to Chuan Ji](https://jichu4n.com/posts/how-x-window-managers-work-and-how-to-write-one-part-i/)
