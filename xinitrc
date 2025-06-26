@@ -1,4 +1,3 @@
-#kitty &
-xterm &
+kitty &
 
 exec ./build/wm

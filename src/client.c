@@ -41,7 +41,7 @@ int findClient(DynamicArray* array, Window compWin, Client* outClient)
     for (size_t i = 0; i < array->size; i++)
     {
       Client client = array->clients[i];
-      if (client.child == compWin)
+      if (client.child == compWin || client.frame == compWin)
       {
         client.index = i;
         *outClient = client;

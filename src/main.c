@@ -1,7 +1,11 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <X11/Xlib.h>
 #include <X11/Xproto.h>
 #include <X11/Xutil.h>
@@ -14,7 +18,8 @@
 
 static Display* display;
 static Window root_window;
-static int screen;
+static int screen_index;
+static Screen* screen;
 static DynamicArray* client_windows;
 
 static Position drag_start_cursor_position;
@@ -24,9 +29,107 @@ static Size     drag_start_window_size;
 
 static Window wmcheckwin;
 
-enum { WMName, WMCheck, WMDeleteWindow, WMProtocols, WMNetSupported, WMNetActiveWindow };
+enum { 
+  WMName,
+  WMCheck,
+  WMDeleteWindow,
+  WMProtocols,
+  WMNetSupported,
+  WMNetActiveWindow,
+  WMWindowType,
+  WMWindowTypeDock
+};
 static Atom utf8string;
 static Atom atoms[6];
+
+bool IsDock(Window w) {
+  Atom actualType;
+  int actualFormat;
+  unsigned long nitems, bytesAfter;
+  Atom* atomsRet = NULL;
+
+  if (XGetWindowProperty(display, w,
+                           atoms[WMWindowType], 0, 1024,
+                           False, XA_ATOM,
+                           &actualType, &actualFormat,
+                           &nitems, &bytesAfter,
+                           (unsigned char**)&atomsRet) == Success) {
+
+        for (unsigned long i = 0; i < nitems; i++) {
+            if (atomsRet[i] == atoms[WMWindowTypeDock]) {
+                XFree(atomsRet);
+                return true;
+            }
+        }
+        XFree(atomsRet);
+    }
+    return false;
+}
+
+void CloseWindow(Client w)
+{
+  Window win = w.child;
+  Window frame = w.frame;
+
+  XReparentWindow(display, win, root_window, 0, 0);
+  XSync(display, false);
+  
+  if (frame != -1) // if frame wasn't passed, then probably it wasn't found in the client list in the first place
+  {
+    removeClient(client_windows, w.index);
+  }
+
+  Atom* supported_protocols;
+  int num_supported_protocols;
+  if (XGetWMProtocols(display,
+        win,
+        &supported_protocols,
+        &num_supported_protocols)) {
+    bool supports_deletwin = false;
+    for (int i = 0; i < num_supported_protocols; i++) 
+    {
+      if (supported_protocols[i] == atoms[WMDeleteWindow]) 
+      {
+        supports_deletwin = true;
+        break;
+      }
+    }
+    if (supports_deletwin) 
+    {
+      printf("Trying to gracefully close thwin\n");
+      XEvent msg;
+      memset(&msg, 0, sizeof(msg));
+      msg.xclient.type = ClientMessage;
+      msg.xclient.message_type = atoms[WMProtocols];
+      msg.xclient.window = win;
+      msg.xclient.format = 32;
+      msg.xclient.data.l[0] = atoms[WMDeleteWindow];
+      if (XSendEvent(display, win, false, 0, &msg) == 0)
+      {
+        printf("Failed to send kill event\n");
+      }
+    } else
+    {
+      printf("Killing window\n");
+      XKillClient(display, win);
+      XDestroyWindow(display, win);
+      if (frame != -1)
+      {
+        XDestroyWindow(display, frame);
+      }
+    }
+  } else 
+  {
+    printf("Killing window\n");
+    XKillClient(display, win);
+    XDestroyWindow(display, win);
+    if (frame != NULL)
+    {
+      XDestroyWindow(display, frame);
+    }
+  }
+
+}
 
 void FocusWindow(Client w, bool raise)
 {
@@ -151,7 +254,9 @@ void OnMapRequest(const XMapRequestEvent* event)
   }
   XMapRequestEvent e = *event;
 
-  AddTitlebar(e.window);
+  if (!IsDock(e.window))
+    AddTitlebar(e.window);
+
   XMapWindow(display, e.window);
 }
 
@@ -190,6 +295,8 @@ void OnConfigureRequest(const XConfigureRequestEvent* event)
   }
   XConfigureRequestEvent e = *event;
 
+  if (IsDock(e.window)) return;
+
   XWindowChanges changes;
   changes.x = e.x;
   changes.y = e.y;
@@ -222,44 +329,17 @@ void OnKeyPress(const XKeyEvent* event)
   if ((e.state & MODKEY) &&
       (e.keycode == XKeysymToKeycode(display, XK_F4))) 
   {
-    Atom* supported_protocols;
-    int num_supported_protocols;
-    if (XGetWMProtocols(display,
-          e.window,
-          &supported_protocols,
-          &num_supported_protocols)) {
-      bool supports_delete_window = false;
-      for (int i = 0; i < num_supported_protocols; i++) 
-      {
-        if (supported_protocols[i] == atoms[WMDeleteWindow]) 
-        {
-          supports_delete_window = true;
-          break;
-        }
-      }
-      if (supports_delete_window) 
-      {
-        printf("Trying to gracefully close the window\n");
-        XEvent msg;
-        memset(&msg, 0, sizeof(msg));
-        msg.xclient.type = ClientMessage;
-        msg.xclient.message_type = atoms[WMProtocols];
-        msg.xclient.window = e.window;
-        msg.xclient.format = 32;
-        msg.xclient.data.l[0] = atoms[WMDeleteWindow];
-        if (XSendEvent(display, e.window, false, 0, &msg) == 0)
-        {
-          printf("Failed to send kill event\n");
-        }
-      } else
-      {
-        printf("Killing window\n");
-        XKillClient(display, e.window);
-      }
-    } else 
+    Client c;
+    if (findClient(client_windows, e.window, &c) == 0)
     {
-      printf("Killing window\n");
-      XKillClient(display, e.window);
+      CloseWindow(c);
+    } else
+    {
+      //No frame found, so gotta improvise
+      c.child = e.window;
+      c.index = 0;
+      c.frame = -1;
+      CloseWindow(c);
     }
   }    
 
@@ -328,13 +408,28 @@ void OnMotionNotify(const XMotionEvent* e) {
     );
   } else if (e->state & Button3Mask)
   {
-    ResizeWindow(window_client, 700, 700);
+    Size newSize = (Size) {
+        drag_start_window_size.width + deltaPosition.x,
+        drag_start_window_size.height + deltaPosition.y
+    };
+    if (newSize.width < MIN_WINDOW_WIDTH) newSize.width = MIN_WINDOW_WIDTH;
+    if (newSize.height < MIN_WINDOW_HEIGHT) newSize.height = MIN_WINDOW_HEIGHT;
+
+    if (newSize.width > screen->width) newSize.width = screen->width;
+    if (newSize.height > screen->height) newSize.height = screen->height;
+
+    ResizeWindow(window_client, newSize.width, newSize.height);
   }
+}
+
+void reap_child(int sig) {
+    while (waitpid(-1, NULL, WNOHANG) > 0);
 }
 
 int main()
 {
   client_windows = createDynamicArray(10);
+
   display = XOpenDisplay(NULL);
   if (display == NULL)
   {
@@ -357,37 +452,60 @@ int main()
   atoms[WMProtocols] = XInternAtom(display, "WM_PROTOCOLS", False);
   atoms[WMNetSupported] = XInternAtom(display, "_NET_SUPPORTED", False);
   atoms[WMNetActiveWindow] = XInternAtom(display, "_NET_ACTIVE_WINDOW", False);
+  atoms[WMWindowType] = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
+  atoms[WMWindowTypeDock] = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DOCK", False);
 
   Atom supported_atoms[] = {
-    atoms[WMNetActiveWindow]
+    atoms[WMNetActiveWindow],
+    atoms[WMWindowType],
+    atoms[WMWindowTypeDock],
+    atoms[WMProtocols],
+    atoms[WMDeleteWindow]
   };
-
-
 
   wmcheckwin = XCreateSimpleWindow(display, root_window, 0, 0, 1, 1, 0, 0, 0);
 	XChangeProperty(display, wmcheckwin, atoms[WMCheck], XA_WINDOW, 32, PropModeReplace, (unsigned char *) &wmcheckwin, 1);
 	XChangeProperty(display, wmcheckwin, atoms[WMName], utf8string, 8, PropModeReplace, (unsigned char *) WM_NAME, 3);
 	XChangeProperty(display, root_window, atoms[WMCheck], XA_WINDOW, 32, PropModeReplace, (unsigned char *) &wmcheckwin, 1);
   XChangeProperty(
-    display,
-    root_window,
-    atoms[WMNetSupported],
-    XA_ATOM,
-    32,
-    PropModeReplace,
-    (unsigned char *)supported_atoms,
-    sizeof(supported_atoms) / sizeof(supported_atoms[0])
-);
+      display,
+      root_window,
+      atoms[WMNetSupported],
+      XA_ATOM,
+      32,
+      PropModeReplace,
+      (unsigned char *)supported_atoms,
+      sizeof(supported_atoms) / sizeof(supported_atoms[0])
+      );
 
   XSelectInput(
       display,
       root_window,
-      SubstructureRedirectMask | SubstructureNotifyMask | KeyPressMask | ButtonPressMask);
+      SubstructureRedirectMask | 
+      SubstructureNotifyMask |
+      KeyPressMask |
+      ButtonPressMask |
+      ExposureMask
+      );
   XSync(display, false);
 
-  screen = DefaultScreen(display);
-  XSetWindowBackground(display, root_window, BlackPixel(display, screen));
+  screen = DefaultScreenOfDisplay(display);
+  screen_index = DefaultScreen(display);
+  XSetWindowBackground(display, root_window, BlackPixel(display, screen_index));
   XClearWindow(display, root_window);
+
+
+  pid_t pid = fork();
+
+  if (pid == 0) {
+    execlp("picom", "picom", "--backend", "xrender", (char *)NULL);
+    printf("Launching startup script failed: (failed to exec)");
+    exit(1);
+  } else if (pid > 0) {
+    printf("Launched startup script (PID: %d)\n", pid);
+  } else {
+    printf("Launching startup script failed: (failed to fork)");
+  }
 
   char running = 1;
 
@@ -421,13 +539,28 @@ int main()
             display, event.xmotion.window, MotionNotify, &event)) {}
         OnMotionNotify(&event.xmotion);
         break;
+      case Expose:
+        XFlush(display);
+        break;
       default:
-        printf("Ignored event\n");
+        //printf("Ignored event\n");
         break;
     }
 
   }
 
+  signal(SIGCHLD, reap_child);
+
+  for (size_t i = 0; i < client_windows->size; i++)
+  {
+    Client client = client_windows->clients[i];
+
+    XDestroyWindow(display, client.child);
+    XDestroyWindow(display, client.frame);
+    removeClient(client_windows, i);
+  }
+
+  XDestroyWindow(display, wmcheckwin);
   XCloseDisplay(display);
   freeDynamicArray(client_windows);
   return 0;

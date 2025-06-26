@@ -10,5 +10,5 @@ xinit ./xinitrc -- \
     "$XEPHYR" \
         :$RANDOM \
         -ac \
-        -screen 800x600 \
+        -screen 1366x768 \
         -host-cursor
